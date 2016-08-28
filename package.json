@@ -1,0 +1,27 @@
+{
+  "name": "oase",
+  "version": "1.0.0",
+  "description": "oase, distributed and clustered filesystem as a nodejs module ",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jacobbogers/oase.git"
+  },
+  "keywords": [
+    "filesystem",
+    "cluster",
+    "distribution",
+    "replication",
+    "files",
+    "content"
+  ],
+  "author": "Jacob Bogers",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/jacobbogers/oase/issues"
+  },
+  "homepage": "https://github.com/jacobbogers/oase#readme"
+}
