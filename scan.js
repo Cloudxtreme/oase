@@ -3,7 +3,6 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const color = require("colors");
 
 //constants
 
@@ -39,7 +38,7 @@ var SECRET = process.env.HMAC_SECRET || "purdy";
 
 // test the hmac existance
 
-var g_hmac = (function () {
+var g_hmac = (function() {
   // lets try 3 differrent hashes
   var rc;
   try {
@@ -153,8 +152,8 @@ function promiseWrap() {
   var arr = Array.from(arguments);
   var func = arr[0];
   arr.splice(0, 1);
-  return new Promise(function (res, rej) {
-    func.call(func /* this */ , ...arr, function (err, ctx) {
+  return new Promise(function(res, rej) {
+    func.call(func /* this */ , ...arr, function(err, ctx) {
       if (err) {
         rej(err);
       } else {
@@ -198,43 +197,43 @@ function file_processing(storage) {
   let set;
 
   switch (storage.state) {
-  case STATE_DISCOVERING:
-    storage.file_count_done++;
-    if (storage.file_count_done % 10) {
-      return; //skip
-    }
-    set = storage.processing_discovery;
-    set.forEach((func, dummy, s) => {
-      //callback
-      process.nextTick(func,
-        storage.error, {
-          file_count_to_do,
-          file_count_done,
-          name
-        });
-    });
-    break;
-  case STATE_HASHING:
-    set = storage.processing_hmac_hashing
-    let files_being_processed = storage.files_being_processed;
-    set.forEach((func, dummy, s) => {
-      //callback
-      process.nextTick(() => {
-        func(storage.error, {
-          file_count_to_do,
-          file_count_done,
-          files_being_processed,
-          name,
-          file_name: storage.key
-        });
-        if (storage.end_of_file) {
-          files_being_processed.delete(storage.key);
-        }
+    case STATE_DISCOVERING:
+      storage.file_count_done++;
+      if (storage.file_count_done % 10) {
+        return; //skip
+      }
+      set = storage.processing_discovery;
+      set.forEach((func, dummy, s) => {
+        //callback
+        process.nextTick(func,
+          storage.error, {
+            file_count_to_do,
+            file_count_done,
+            name
+          });
       });
-    });
-    break;
-  default:
-    return; //skip this
+      break;
+    case STATE_HASHING:
+      set = storage.processing_hmac_hashing
+      let files_being_processed = storage.files_being_processed;
+      set.forEach((func, dummy, s) => {
+        //callback
+        process.nextTick(() => {
+          func(storage.error, {
+            file_count_to_do,
+            file_count_done,
+            files_being_processed,
+            name,
+            file_name: storage.key
+          });
+          if (storage.end_of_file) {
+            files_being_processed.delete(storage.key);
+          }
+        });
+      });
+      break;
+    default:
+      return; //skip this
   }
 }
 
@@ -243,58 +242,61 @@ function is_file_processing_done(storage) {
   let file_count_to_do = storage.file_count_to_do;
   let file_count_done = storage.file_count_done;
 
+  //
+
   let set = null;
   let name = storage.name;
 
   // call processing_xxx listeners one more time, then remove the listeners
+
   switch (storage.state) {
-  case STATE_DISCOVERING:
-    if (file_count_done != file_count_to_do) {
-      return false; //not done yet
-    }
-    set = storage.processing_discovery;
-    set.forEach((func, dummy, s) => {
-      //callback
-      process.nextTick(func,
-        storage.error, {
-          file_count_to_do,
-          file_count_done,
-          name
-        });
-    });
-    set.clear();
-    storage.state = STATE_DISCOVERED;
-    set = storage.done_discovered;
-    set.forEach((func, dummy, s) => {
-      process.nextTick(() => {
-        func(storage.error, {
-          file_count_to_do,
-          file_count_done,
-          name
+    case STATE_DISCOVERING:
+      if (file_count_done != file_count_to_do) {
+        return false; //not done yet
+      }
+      set = storage.processing_discovery;
+      set.forEach((func, dummy, s) => {
+        //callback
+        process.nextTick(func,
+          storage.error, {
+            file_count_to_do,
+            file_count_done,
+            name
+          });
+      });
+      set.clear();
+      storage.state = STATE_DISCOVERED;
+      set = storage.done_discovered;
+      set.forEach((func, dummy, s) => {
+        process.nextTick(() => {
+          func(storage.error, {
+            file_count_to_do,
+            file_count_done,
+            name
+          });
         });
       });
-    });
-    set.clear();
-    break;
-  case STATE_HASHING:
-    set = storage.processing_hmac_hashing;
-    set.clear();
-    //
-    set = storage.done_hmac;
-    set.forEach((func, dummy, s) => {
-      process.nextTick(() => {
-        func({
-          file_count_to_do,
-          file_count_done,
-          name
+      set.clear();
+      break;
+    case STATE_HASHING:
+      set = storage.processing_hmac_hashing;
+      set.clear();
+      //
+      set = storage.done_hmac;
+      set.forEach((func, dummy, s) => {
+        process.nextTick(() => {
+          func({
+            file_count_to_do,
+            file_count_done,
+            name
+          });
         });
       });
-    });
-    set.clear();
-    storage.state = STATE_HASHED;
-    break;
-  default:
-    //skip this
+      set.clear();
+      storage.state = STATE_HASHED;
+      break;
+    default:
+      //skip this
   }
   return true;
 }
@@ -309,6 +311,11 @@ function get_storage(storage_name) {
 
   let storage = global_storage.get(storage_name.toLowerCase());
   return storage;
+}
+
+function get_storage_list() {
+  let rc = Array.from(global_storage);
+  return rc;
 }
 
 function get_file_list(storage_name, options) {
@@ -421,7 +428,7 @@ function add_storage(options) {
   name = name.toLowerCase();
   if (global_storage.has(name)) {
     let error_description = ERR_NAME_ALREADY_EXIST[1].replace('%s', name);
-    let error = ERR_NO_NAME_ALREADY_EXIST[0];
+    let error = ERR_NAME_ALREADY_EXIST[0];
     return {
       error,
       error_description,
@@ -441,12 +448,16 @@ function add_storage(options) {
   }
   let base_dirs = options.baseDirs;
   assert_array_of_strings(base_dirs, "[baseDirs option property]");
+  let short_name_func = options.shortName;
+  assert_function(short_name);
   let dir_map = new Map(base_dirs.map(cur => [cur, null])),
     state = STATE_UNINITIALIZED,
     storage = {
       name,
       dir_map,
       state,
+      short_name_func,
+      files_by_short_names:new Map();
       files_by_hmac: new Map(),
       /* paritioned in 4 groups, for faster operation */
       processing_discovery: new Set(),
@@ -529,9 +540,10 @@ function scan_dirs(map, file_path) {
   // console.log("map,path,flags,mode", map, file_path, flags, mode);
   promiseWrap(fs.lstat, file_path).then(
     (stat) => {
+     //TODO call shortname function (..with process.nextTick()..) (lstat,file_path,map.storage.dir_map)
       if (stat.isDirectory()) {
         //console.log(stat);
-        console.log("isDirectory:".green, true);
+        console.log("isDirectory:", true);
         var map_children = new Map();
         map.set(file_path, map_children);
         map_children.set(".", stat);
@@ -619,7 +631,7 @@ function hash_files(storage_name, count_concurrent) {
       console.log('this "thread" will stop...');
       //throw new Error("wtf?");
       if (files_being_processed.size == 0) {
-        console.log("FINISHED".underline.red);
+        console.log("FINISHED");
         is_file_processing_done(storage);
       }
       return;
@@ -635,7 +647,7 @@ function hash_files(storage_name, count_concurrent) {
     promiseWrap(fs.open, key, 'r', 0o666)
       .then((fd) => {
         let buffer = new Buffer.alloc(READ_FILE_BUF_SIZE);
-        return new Promise(function (resolve, rej) {
+        return new Promise(function(resolve, rej) {
           let signal_count = CHUNK_SIZE_100MB;
 
           function read_next_piece(position, buf_length = buffer.length) {
@@ -704,7 +716,7 @@ function hash_files(storage_name, count_concurrent) {
         process.nextTick(() => {
           process_file(all_files.pop());
         });
-        console.log(("error:" + (++seq)).red, stat.bytes_processed, err);
+        console.log(("error:" + (++seq)), stat.bytes_processed, err);
       });
   }
   let i = 0;
@@ -714,68 +726,6 @@ function hash_files(storage_name, count_concurrent) {
     i++;
   }
 }
-/*
-  test
-*/
-var k = add_storage({
-  name: "porn-stash",
-  baseDirs: [
-    '/home/jacobbogers/1T_seagate/testdir',
-  ],
-}).onDiscovered((error, result) => {
-  console.log("done:", result);
-  let l = get_file_list(result.name, {
-    filter: LIST_FILTER_ALL
-  });
-  console.log('list1', l);
-  hash_files("porn-stash", 3);
-}).onDiscovering((error, result) => {
-  console.log('ping:', result);
-}).onHashing((error, result) => {
-  let key = result.file_name;
-  let stat = result.files_being_processed.get(key);
-  let bytes_processed, size;
-  if (stat) {
-    if (stat.bytes_processed != undefined) {
-      bytes_processed = stat.bytes_processed;
-    }
-    if (stat.size != undefined) {
-      size = stat.size;
-    }
-  }
-  if (stat && stat.error) {
-    console.log("err:", stat.error);
-  } else {
-    console.log("progress: ${1}/${2} ${3} processing".replace("${1}", bytes_processed).replace("${2}", size).replace("${3}", key).green);
-  }
-}).onHashed((result) => {
-  console.log("hashing done:", result);
-  let l = get_file_list(result.name, {
-    filter: LIST_FILTER_ALL
-  });
-  console.log(l);
-  let files = get_multiples_by_hmac(result.name);
-  console.log(files);
-});
-
-discover_files("porn-stash");
-
-/**
-const STATE_UNINITIALIZED = "uninitialized";
-const STATE_DISCOVERING = "discovering";
-const STATE_DISCOVERED = "discovered";
-const STATE_HASHING = "hashing";
-const STATE_HASHED = "hashed";
-
-const EVENT_DISCOVERED = STATE_DISCOVERED;
-const EVENT_HASHED = STATE_HASHED;
-const EVENT_FILES_PROCESSING = "processing_files";
-
-const LIST_FILTER_EXCLUDE_SCAN_ERRORS ="exclude_errors";
-const LIST_FILTER_INCLUDE_SCAN_ERRORS = "include_errors";
-const LIST_FILTER_SCAN_ERRORS_ONLY ="only_errors";
-
-*/
 
 module.exports = {
   states: {
@@ -792,6 +742,7 @@ module.exports = {
   },
   addStorage: add_storage,
   getStorage: get_storage,
+  getStorageList: get_storage_list,
   discoverFiles: discover_files,
   hashFiles: hash_files,
   getFileList: get_file_list,
