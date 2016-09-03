@@ -30,6 +30,7 @@ const EVENT_HASHED = STATE_HASHED;
 const EVENT_FILES_PROCESSING = "processing_files";
 
 const CHUNK_SIZE_100MB = 1024 * 1024 * 100;
+const CHUNK_SIZE_UPLOAD = 100 * 1024;
 const READ_FILE_BUF_SIZE = 65336 * 4; //256k
 
 var global_storage = new Map();
@@ -49,26 +50,46 @@ var g_hmac = (function() {
   return rc;
 })();
 
-//
-// create storage object (outside module), consist of ONE  or MORE directories to scan
-// storage object has associated eventEmitters
-// storage object has a unique name
-// storage object is an a database called global_storage (not exported)
-// after discovery also possible a background MD5 hash scan of files in storage
-//
+/* generic utilities */
+/* generic utilities */
+/* generic utilities */
 
-/**
-   name (name storage like "books", "vacation photos", etc)
-   tree << injected ( array of base dirs the base_dirs );
-   state << injected (discovery, md5, etc)
-   event_emitter  << injected
-*/
 
-/* generic utilities */
-/* generic utilities */
-/* generic utilities */
+
+function nano_time() {
+  let hrt = process.hrtime();
+  return hrt[0] * 1E9 + hrt[1];
+}
+
+function rate(curr_ts, prev_ts, metric, time_unit) {
+  let span = curr_ts - prev_ts;
+  if (metric == 0) {
+    return 0;
+  }
+  if (span == 0) {
+    return undefined;
+  }
+  return metric / span * time_unit;
+}
+
+function flat_map_sort_on_key(map) {
+  let rc = flat_map(map);
+  rc.sort((a, b) => {
+    let k1 = a[0];
+    let k2 = b[0];
+    if (k1 > k2) {
+      return 1;
+    }
+    if (k1 < k2) {
+      return -1;
+    }
+    return 0;
+  });
+  return new Map(rc);
+};
 
 function flat_map(map) {
+
   var rc = [];
 
   function reduce(_map) {
@@ -84,6 +105,18 @@ function flat_map(map) {
     }
   }
   reduce(map);
+  //sort on keys
+  return rc.sort((a, b) => {
+    let k1 = a[0];
+    let k2 = b[0];
+    if (k1 < k2) {
+      return -1;
+    }
+    if (k1 > k2) {
+      return 1;
+    }
+    return 0;
+  });
   return rc;
 }
 
@@ -93,7 +126,6 @@ function assert_function(func, name) {
     e[1].replace("%s", name);
     throw e;
   }
-
 }
 
 function assert_array(arr, name) {
@@ -148,7 +180,7 @@ function in_arr(arr, value) {
   return false;
 }
 
-function promiseWrap() {
+function promise_wrap() {
   var arr = Array.from(arguments);
   var func = arr[0];
   arr.splice(0, 1);
@@ -166,6 +198,34 @@ function promiseWrap() {
 /* storage management */
 /* storage management */
 /* storage management */
+
+function file_type(stats) {
+
+  let rc = '';
+
+  if (!stats) {
+    return rc;
+  }
+
+  if (stats.isFile()) {
+    rc = 'file';
+  } else if (stats.isDirectory()) {
+    rc = 'dir';
+  } else if (stats.isBlockDevice()) {
+    rc = 'block-dev;'
+  } else if (stats.isCharacterDevice()) {
+    rc = 'char-dev'
+  } else if (stats.isSymbolicLink()) {
+    rc = 'sym-link';
+  } else if (stats.isFIFO()) {
+    rc = 'fifo';
+  } else if (stats.isSocket()) {
+    rc = 'socket';
+  }
+  stats.file_type = rc;
+  return rc;
+}
+
 
 function count_files(map) {
   let rc = [0, 0];
@@ -237,52 +297,32 @@ function file_processing(storage) {
   }
 }
 
-function is_file_processing_done(storage) {
+function is_file_processing_done(storage_extended) {
 
-  let file_count_to_do = storage.file_count_to_do;
-  let file_count_done = storage.file_count_done;
-
+  let file_count_to_do = storage_extended.file_count_to_do;
+  let file_count_done = storage_extended.file_count_done;
   //
-
   let set = null;
-  let name = storage.name;
-
+  let name = storage_extended.name;
   // call processing_xxx listeners one more time, then remove the listeners
-
-  switch (storage.state) {
+  switch (storage_extended.state) {
     case STATE_DISCOVERING:
       if (file_count_done != file_count_to_do) {
         return false; //not done yet
       }
-      set = storage.processing_discovery;
+      set = storage_extended.processing_discovery;
       set.forEach((func, dummy, s) => {
         //callback
         process.nextTick(func,
-          storage.error, {
+          storage_extended.error, {
             file_count_to_do,
             file_count_done,
             name
           });
       });
       set.clear();
-      storage.state = STATE_DISCOVERED;
-      set = storage.done_discovered;
-      set.forEach((func, dummy, s) => {
-        process.nextTick(() => {
-          func(storage.error, {
-            file_count_to_do,
-            file_count_done,
-            name
-          });
-        });
-      });
-      set.clear();
-      break;
-    case STATE_HASHING:
-      set = storage.processing_hmac_hashing;
-      set.clear();
-      //
-      set = storage.done_hmac;
+      storage_extended.state = STATE_DISCOVERED;
+      set = storage_extended.done_discovered;
       set.forEach((func, dummy, s) => {
         process.nextTick(() => {
           func({
@@ -293,8 +333,25 @@ function is_file_processing_done(storage) {
         });
       });
       set.clear();
-      storage.state = STATE_HASHED;
       break;
+    case STATE_HASHING:
+      set = storage_extended.processing_hmac_hashing;
+      set.clear();
+      //
+      set = storage_extended.done_hmac;
+      set.forEach((func, dummy, s) => {
+        process.nextTick(() => {
+          func({
+            file_count_to_do,
+            file_count_done,
+            name
+          });
+        });
+      });
+      set.clear();
+      storage_extended.state = STATE_HASHED;
+      //NOTE: there is already a  [ storage.files_by_hmac ] MAP (build during the hashing)
+      storage_extended.files_by_key = flat_map_sort_on_key(storage_extended.dir_map);
     default:
       //skip this
   }
@@ -380,7 +437,7 @@ function get_file_list(storage_name, options) {
         reduce(payl);
         continue;
       }
-      console.log('Warning inconsistency in function "getFileList"!');
+      console.log('WARNING: inconsistency in function "getFileList"!');
     }
   }
   reduce(storage.dir_map); //kickoff
@@ -446,18 +503,16 @@ function add_storage(options) {
       },
     };
   }
+
   let base_dirs = options.baseDirs;
   assert_array_of_strings(base_dirs, "[baseDirs option property]");
-  let short_name_func = options.shortName;
-  assert_function(short_name);
+
   let dir_map = new Map(base_dirs.map(cur => [cur, null])),
     state = STATE_UNINITIALIZED,
     storage = {
       name,
       dir_map,
       state,
-      short_name_func,
-      files_by_short_names:new Map();
       files_by_hmac: new Map(),
       /* paritioned in 4 groups, for faster operation */
       processing_discovery: new Set(),
@@ -465,6 +520,7 @@ function add_storage(options) {
       done_hmac: new Set(),
       done_discovered: new Set()
     };
+
   global_storage.set(name, storage);
 
   function discovered(func) {
@@ -508,24 +564,23 @@ function discover_files(storage_name) {
 
   assert_defined_and_not_null(storage_name, "storage_name");
   let storage = global_storage.get(storage_name);
-
+  //all ok for now
   if (storage == null) {
     return {
       errno: -1,
       err_descr: "storage [" + storage_name + "] doesnt exist"
     };
   }
+  //
   if (in_arr([STATE_DISCOVERING, STATE_HASHING], storage.state)) {
     return {
       errno: -2,
       err_descr: "storage [" + storage.name + "] is already active: [" + storage.state + "]"
     };
   }
-  //--all ok
+  //all ok
   storage.state = STATE_DISCOVERING;
-  //
-  //--bootstrap base dirs to the count todo
-  //
+  //bootstrap base dirs to the count todo
   const dir_map = storage.dir_map;
   storage.file_count_to_do = storage.dir_map.size;
   storage.file_count_done = 0;
@@ -538,23 +593,25 @@ function discover_files(storage_name) {
 
 function scan_dirs(map, file_path) {
   // console.log("map,path,flags,mode", map, file_path, flags, mode);
-  promiseWrap(fs.lstat, file_path).then(
+  promise_wrap(fs.lstat, file_path).then(
     (stat) => {
-     //TODO call shortname function (..with process.nextTick()..) (lstat,file_path,map.storage.dir_map)
+      // TODO: when implementing shortname factory method, the call goes here.
+      //       call shortname function (..with process.nextTick()..) (lstat,file_path,map.storage.dir_map)
+      stat.full_path = file_path;
+      file_type(stat); //enrich stats with file_type
       if (stat.isDirectory()) {
-        //console.log(stat);
-        console.log("isDirectory:", true);
         var map_children = new Map();
         map.set(file_path, map_children);
         map_children.set(".", stat);
         map_children.parent = map;
         map_children.storage = map.storage;
-        promiseWrap(fs.readdir, file_path).then(
+        promise_wrap(fs.readdir, file_path).then(
           (files) => {
             map.storage.file_count_to_do += files.length;
             file_processing(map.storage);
             files.forEach((file, idx, arr) => {
-              scan_dirs(map_children, path.join(file_path, file));
+
+              process.nextTick(scan_dirs, map_children, path.join(file_path, file));
             });
             is_file_processing_done(map.storage);
           }
@@ -590,35 +647,36 @@ function hash_files(storage_name, count_concurrent) {
   if (count_concurrent == undefined) {
     count_concurrent = 4;
   }
-
+  //
   assert_defined_and_not_null(storage_name, "storage_name");
   let storage = global_storage.get(storage_name);
-
+  //
   if (storage == null) {
     return {
       errno: -1,
       err_descr: "storage [" + storage_name + "] doesnt exist"
     };
   }
+  //
   if (!in_arr([STATE_DISCOVERED, STATE_HASHED], storage.state)) {
     return {
       errno: -2,
       err_descr: "storage [" + storage.name + "] is already active: [" + storage.state + "]"
     };
   }
-
+  //
   if (!g_hmac) {
     return {
       errno: -3,
       err_descr: "no hash function (md5,sha256, md4) availible on system"
     };
   }
-  // --all ok
+  // -- all ok
   const dir_map = storage.dir_map;
   storage.file_count_to_do = count_files(dir_map);
   storage.state = STATE_HASHING;
   //
-  // --bootstrap base dirs to the count todo
+  // -- bootstrap base dirs to the count todo
   //
   storage.file_count_done = [0, 0];
   storage.files_being_processed = new Map();
@@ -644,13 +702,16 @@ function hash_files(storage_name, count_concurrent) {
     let hmac = crypto.createHmac('sha256', SECRET);
     hmac.setEncoding('hex');
     //
-    promiseWrap(fs.open, key, 'r', 0o666)
+    promise_wrap(fs.open, key, 'r', 0o666)
       .then((fd) => {
         let buffer = new Buffer.alloc(READ_FILE_BUF_SIZE);
         return new Promise(function(resolve, rej) {
           let signal_count = CHUNK_SIZE_100MB;
 
-          function read_next_piece(position, buf_length = buffer.length) {
+          function read_next_piece(position, buf_length) {
+            if (buf_length == undefined) {
+              buf_length = buffer.length;
+            }
             fs.read(fd, buffer, 0, buf_length, position, (err, bytes_read, _buffer) => {
               if (err) {
                 fs.close(fd);
@@ -671,6 +732,7 @@ function hash_files(storage_name, count_concurrent) {
                   key
                 }, storage));
               }
+
               read_next_piece(position + bytes_read);
             });
           }
@@ -684,7 +746,6 @@ function hash_files(storage_name, count_concurrent) {
         storage.file_count_done[0]++;
         storage.file_count_done[1] += stat.size || 0;
         //update set_
-
         let files = storage.files_by_hmac.get(hmac) || [];
         files.push(key);
         storage.files_by_hmac.set(hmac, files);
@@ -694,10 +755,9 @@ function hash_files(storage_name, count_concurrent) {
           key,
           end_of_file
         }, storage));
-        //console.log(("finish:" + (++seq)).green, key, stat.hmac, "<<");
-        process.nextTick(() => {
-          process_file(all_files.pop());
-        });
+        // console.log(("finish:" + (++seq)).green, key, stat.hmac, "<<");
+        process.nextTick(process_file, all_files.pop());
+
       })
       .catch((error) => {
         stat.error = error;
@@ -727,6 +787,247 @@ function hash_files(storage_name, count_concurrent) {
   }
 }
 
+
+
+/** expressjs middleware */
+/** expressjs middleware */
+/** expressjs middleware */
+
+function oase_expressjs(req, resp, next) {
+  //are we on one of the storage stubs??
+  let rc = /^\/([^\/]+)/.exec(req.path);
+  if (!rc) {
+    console.log("exit waypoint-3");
+    return next(); //Skip
+  }
+  let storage_name = rc[1];
+  if (!rc) {
+    console.log("exit waypoint-2");
+    return next(); //skip
+  }
+  let storage = get_storage(storage_name);
+  if (!storage) {
+    console.log("exit waypoint-1");
+    return next(); //not a storage
+  }
+  //   the  format must be
+  //   ..../storage_name/key/[physical full path]
+  //    or
+  //   ..../storage_name/hmac/[sha256]
+  //  or
+  //   .../storage_name  ==> admin console for this storage_name
+
+  let rest_path = req.path.replace(rc[0], '');
+
+  //admin console?
+  if (rest_path === "") {
+    resp.set({
+      'Content-Type': 'text/json',
+      'X-Storage-State': storage.state
+    });
+    let status = {
+      name: storage.name,
+      state: storage.state,
+      file_count_to_do: storage.file_count_to_do,
+      file_count_done: storage.file_count_done,
+    }; //to do , compose
+
+    if (storage.state == STATE_HASHING &&
+      storage.files_being_processed &&
+      storage.files_being_processed.size > 0) {
+      //
+      let fbp = Array.from(storage.files_being_processed.values());
+      let mapped_fbp = fbp.map((itm) => {
+        return {
+          size: itm.size,
+          full_path: itm.full_path,
+          bytes_processed: itm.bytes_processed,
+        }
+      });
+      Object.assign(status, {
+        fbp: mapped_fbp
+      });
+    }
+    //return full file list
+    if (storage.state == STATE_HASHED) {
+      let list = get_file_list(storage.name, {
+        filter: LIST_FILTER_ALL
+      });
+      Object.assign(status, {
+        files: list.map((itm) => {
+          let v = itm[1];
+          return {
+            size: v.size,
+            full_path: v.full_path,
+            hmac: v.hmac,
+            bytes_processed: v.bytes_processed,
+            history_histogram: v.histograms || {},
+            type:v.file_type,
+            data_mod_time:v.mtime,
+            access_time:v.atime,
+            meta_data_mod_time:v.ctime,
+            birth_time:v.birthtime
+          };
+        })
+      });
+    }
+    resp.send(status);
+    return;
+  }
+  //request resource, but storage must be ready first, check!
+  if (storage.state != STATE_HASHED) {
+    resp.set({
+      'Content-Type': 'text/json',
+      'X-Storage-State': storage.state
+    });
+    resp.status(500).send({
+      error: -1,
+      descr: "Storage not ready, it has state:" + storage.state
+    });
+    return;
+  }
+  //
+  // ok, se now we check for pattern /xxx/yyy
+  //
+  rc = /^\/(key|hmac)\/(.+)$/.exec(rest_path);
+  if (!rc || !rc.length == 3) {
+    console.log("exit waypoint0");
+    return next(); // invalid format, let other middleware handle it
+  }
+  let search_term = rc[2];
+  let stat, files, key;
+  switch (rc[1]) {
+    case "key":
+      key = "/" + search_term;
+      stat = storage.files_by_key.get(key);
+      break;
+    case "hmac":
+      files = storage.files_by_hmac.get(search_term);
+      if (files && files.length > 0) {
+        key = files[0];
+        stat = storage.files_by_key.get(key);
+      }
+      break;
+    default:
+      // NOTE:arriving here should never happen the regexp prevents this
+      return next();
+  }
+  if (!stat) {
+    console.log("exit waypoint2");
+    return next(); //404 file not found in a valid storage
+  }
+  //send file to requester
+  //send_file(stat, resp, func_update, func_complete, func_err); // start sending
+  send_file(stat, resp, this.func_update, this.func_complete, this.func_err);
+  return;
+}
+
+function send_file(stat, resp, func_update, func_complete, func_err) {
+
+  //defaults
+  func_err = func_err || () => {};
+  func_complete = func_complete || () => {};
+  func_update = func_update || () => {};
+
+  let performance = {
+    rates: []
+  };
+
+  stat.histograms = stat.histograms || {
+    io_err: 0,
+    conn_err: 0,
+    success_uploads: 0,
+    broken_uploads: 0
+  };
+
+  let fis = fs.createReadStream(stat.full_path, {
+    autoClose: true
+  });
+
+  let total_bytes_read = 0;
+  let prev_ts = nano_time();
+
+  if (stat.size) {
+    resp.set({
+      "Content-Length": stat.size
+    });
+  }
+  fis.pause();
+
+  fis.on("data", (chunk) => {
+    total_bytes_read += chunk.length;
+    if (total_bytes_read > CHUNK_SIZE_UPLOAD) {
+      let temp_ts = nano_time();
+      performance.rates.push({
+        dt: temp_ts - prev_ts
+      });
+      //let rate = util.rate(temp_ts, prev_ts, total_bytes_read, 1E9);
+      total_bytes_read = 0;
+      process.nextTick(func_update, performance, stat);
+    }
+  });
+  fis.on("end", () => {
+    resp.end(); //must call to close pipe end
+    fis.close(); //redundent
+  }); // call end on the response stream aswell!
+  fis.on("error", (err) => {
+    if (!resp.headersSent) {
+      resp.set({
+        'Content-Type': 'text/json',
+        'X-Error': err
+      });
+      resp.status(500).send({
+        error: "io-error, administrator has been notified"
+      });
+    }
+    resp.err = true;
+    process.nextTick(func_err, err, stat);
+    resp.end();
+    fis.close();
+    stat.histograms.io_err++;
+  });
+  resp.on("close", () => {
+    process.nextTick(func_err, {
+      errno: -1,
+      error: "socket ended prematurely"
+    }, stat);
+    stat.histograms.broken_uploads++;
+    resp.err = true;
+    resp.end();
+    fis.close();
+  });
+  resp.on("error", (err) => {
+    process.nextTick(func_err, err, stat);
+    stat.histograms.conn_err++;
+    resp.err = true;
+    resp.end();
+    fis.close();
+  });
+  resp.on("finish", () => {
+    if (resp.err) {
+      return;
+    }
+    process.nextTick(func_complete, performance, stat);
+    stat.histograms.success_uploads++;
+  }); //all finalized
+  fis.pipe(resp, {
+    end: false
+  });
+  fis.resume();
+}
+
+
+function configure_oase_expressjs(func_update, func_complete, func_err) {
+  let context = {
+    func_update,
+    func_complete,
+    func_err,
+  };
+  return oase_expressjs.bind(context);
+}
+
+
+
 module.exports = {
   states: {
     STATE_UNINITIALIZED,
@@ -747,5 +1048,6 @@ module.exports = {
   hashFiles: hash_files,
   getFileList: get_file_list,
   getMultiples: get_multiples_by_hmac,
-  getFilesByHmac: get_file_by_hmac
+  getFilesByHmac: get_file_by_hmac,
+  confOaseExpressJS: configure_oase_expressjs
 }
