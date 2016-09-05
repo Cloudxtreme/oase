@@ -32,17 +32,12 @@
 
   Middleware
   ===========
-
   define partial uploaded file pattern
   skip partial uploaded file from serving via url
-
   if client uploading to repo, check if the same partial_file_exist and timed-out
 
-  garbage collect timed out partial uploads, look in flattened key_list
-  garbage collect can be signalled by an emitter (this is how we can also delet partial during)
-
+  garbage collect timed out partial uploads, look in flattened key_list "storage.files_by_key"
   file uploaded is registerd as a partial for the storage.
-
 
 */
 
