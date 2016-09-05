@@ -1,5 +1,46 @@
 'use strict';
 
+/*
+
+  storage
+  ========
+
+  there should be an alert log..per storage
+
+  storage is set to "initializing"
+  test if dictionary can be opened? no? --> storage is marked unusable
+  read dictionary? --> invalid configfile --> storage is marked unusable
+
+  discovery --> if base dir is unusable --> storage is marked unusable
+
+  +storage is marked "discovering".
+  +discovery finished --> merge with dictionary! --> storage is marked "discovered"
+  +only hash files the accourding to dictiontary!
+  storage is marked "hashing"
+  save result as new dictionary
+  storage is marked "hashed"
+  --
+  storage is ready to receive data!!
+
+  data uplaod is
+
+  partial.length_file_name.file_name.uuid.[md5 has of all previous fields] (io.error -->mark storage as readonly)
+  rename to "file_name-0n.ext" if it already existance (io.error--> mark storage as readonly)
+  put the sha2 int the dictionary in memory
+  mark the dictionary for flush (io.error -> mark storage as unusable and offline)
+  log all crap in alert log entry. [fixed record length, round robin rotating entries]
+
+  Middleware
+  ===========
+  define partial uploaded file pattern
+  skip partial uploaded file from serving via url
+  if client uploading to repo, check if the same partial_file_exist and timed-out
+  garbage collect timed out partial uploads
+
+
+
+*/
+
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -16,10 +57,15 @@ const ERR_NAME_ALREADY_EXIST = [4000, "A storage with this the same [name %s] is
 const ERR_STORAGE_NAME_NOT_FOUND = [5000, "No storage with name %s is registered."];
 //
 const STATE_UNINITIALIZED = "uninitialized";
+const STATE_INITIALIZING = "initializing";
 const STATE_DISCOVERING = "discovering";
 const STATE_DISCOVERED = "discovered";
 const STATE_HASHING = "hashing";
 const STATE_HASHED = "hashed";
+const STATE_MERGING_DICTIONARY = "merging_dictionary";
+const STATE_MERGED_DICTIONARY = "dictionary_merged";
+const STATE_READ_ONLY = "read_only";
+const STATE_UNUSABLE = "unusable";
 
 const LIST_FILTER_EXCLUDE_SCAN_ERRORS = "exclude_errors";
 const LIST_FILTER_ALL = "include_errors";
@@ -36,6 +82,8 @@ const READ_FILE_BUF_SIZE = 65336 * 4; //256k
 var global_storage = new Map();
 
 var SECRET = process.env.HMAC_SECRET || "purdy";
+
+var TRACE = process.env.TRACE_LEVEL;
 
 // test the hmac existance
 
@@ -54,6 +102,26 @@ var g_hmac = (function() {
 /* generic utilities */
 /* generic utilities */
 
+function move_property(prop_names, target, source, verify) {
+  if (!(prop_names instanceof Array)) {
+    prop_names = [prop_names];
+  }
+  for (let prop of prop_names) {
+    if (verify(source[prop])) {
+      target[prop] = source[prop];
+      delete source[prop];
+    }
+  }
+}
+
+function isFunction(p) {
+  return (p instanceof Function);
+}
+
+
+function isString(s) {
+  return (typeof s === "string");
+}
 
 
 function nano_time() {
@@ -376,6 +444,7 @@ function get_storage_list() {
 }
 
 function get_file_list(storage_name, options) {
+
   let defaults = Object.assign({
     filter: LIST_FILTER_ALL
   }, options);
@@ -503,44 +572,49 @@ function add_storage(options) {
       },
     };
   }
+  let base_dir = options.baseDir;
+  assert_string(base_dir, "[baseDir option property]");
+  let dir_map = new Map([base_dir, null]);
 
-  let base_dirs = options.baseDirs;
-  assert_array_of_strings(base_dirs, "[baseDirs option property]");
+  let dictionary = options.dictionaryDir;
+  assert_string(dictionary, "[dictionaryDir option property]");
 
-  let dir_map = new Map(base_dirs.map(cur => [cur, null])),
-    state = STATE_UNINITIALIZED,
-    storage = {
-      name,
-      dir_map,
-      state,
-      files_by_hmac: new Map(),
-      /* paritioned in 4 groups, for faster operation */
-      processing_discovery: new Set(),
-      processing_hmac_hashing: new Set(),
-      done_hmac: new Set(),
-      done_discovered: new Set()
-    };
+
+
+  let state = STATE_UNINITIALIZED;
+
+  let storage = {
+    name,
+    dir_map,
+    dictionary,
+    state,
+    files_by_hmac: new Map(),
+    /*
+       paritioned in 4 groups, for faster operation
+    */
+    processing_discovery: new Set(),
+    processing_hmac_hashing: new Set(),
+    done_hmac: new Set(),
+    done_discovered: new Set()
+  };
 
   global_storage.set(name, storage);
 
   function discovered(func) {
     assert_function(func);
     storage.done_discovered.add(func);
-    //delete this.onDiscovered;
     return this;
   }
 
   function mac_hashed(func) {
     assert_function(func);
     storage.done_hmac.add(func);
-    //delete this.onHashed;
     return this;
   }
 
   function discovering(func) {
     assert_function(func);
     storage.processing_discovery.add(func);
-    //delete this.onDiscovering;
     return this;
   }
 
@@ -551,13 +625,14 @@ function add_storage(options) {
     return this;
   }
 
+  merge_with_dictionary(storage);
+
   return {
     onDiscovered: discovered,
     onHashed: mac_hashed,
     onDiscovering: discovering,
     onHashing: hashing
   };
-
 }
 
 function discover_files(storage_name) {
@@ -820,6 +895,7 @@ function oase_expressjs(req, resp, next) {
   let rest_path = req.path.replace(rc[0], '');
 
   //admin console?
+
   if (rest_path === "") {
     resp.set({
       'Content-Type': 'text/json',
@@ -862,11 +938,11 @@ function oase_expressjs(req, resp, next) {
             hmac: v.hmac,
             bytes_processed: v.bytes_processed,
             history_histogram: v.histograms || {},
-            type:v.file_type,
-            data_mod_time:v.mtime,
-            access_time:v.atime,
-            meta_data_mod_time:v.ctime,
-            birth_time:v.birthtime
+            type: v.file_type,
+            data_mod_time: v.mtime,
+            access_time: v.atime,
+            meta_data_mod_time: v.ctime,
+            birth_time: v.birthtime
           };
         })
       });
@@ -972,6 +1048,7 @@ function send_file(stat, resp, func_update, func_complete, func_err) {
   }); // call end on the response stream aswell!
   fis.on("error", (err) => {
     if (!resp.headersSent) {
+
       resp.set({
         'Content-Type': 'text/json',
         'X-Error': err
@@ -1017,16 +1094,32 @@ function send_file(stat, resp, func_update, func_complete, func_err) {
 }
 
 
-function configure_oase_expressjs(func_update, func_complete, func_err) {
-  let context = {
-    func_update,
-    func_complete,
-    func_err,
-  };
+function configure_oase_expressjs(options) {
+  let context = {},
+    cpy = {};
+
+
+  if (!options) {
+    throw new TypeError("Specifiy [options] argument!");
+  }
+
+  Object.assign(cpy, options);
+  move_property(["func_complete", "func_err", "func_update"], context, cpy, isFunction);
+
+  try {
+    let testdir = fs.lstatSync(context.uploadDir);
+  } catch (e) {
+    //some error occurred so
+    console.error('Not a valid [uploadDir]:', e);
+    throw e;
+  }
+
+  if (Object.getOwnPropertyNames(options).length > 0) {
+    throw new TypeError("Argument [options] has unknown properties");
+  }
+
   return oase_expressjs.bind(context);
 }
-
-
 
 module.exports = {
   states: {
