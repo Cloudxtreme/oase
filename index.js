@@ -2,7 +2,7 @@
 
 /*
 
-  storage
+  Storage
   ========
 
   there should be an alert log..per storage
@@ -32,11 +32,16 @@
 
   Middleware
   ===========
+
   define partial uploaded file pattern
   skip partial uploaded file from serving via url
-  if client uploading to repo, check if the same partial_file_exist and timed-out
-  garbage collect timed out partial uploads
 
+  if client uploading to repo, check if the same partial_file_exist and timed-out
+
+  garbage collect timed out partial uploads, look in flattened key_list
+  garbage collect can be signalled by an emitter (this is how we can also delet partial during)
+
+  file uploaded is registerd as a partial for the storage.
 
 
 */
@@ -276,21 +281,27 @@ function file_type(stats) {
   }
 
   if (stats.isFile()) {
-    rc = 'file';
-  } else if (stats.isDirectory()) {
-    rc = 'dir';
-  } else if (stats.isBlockDevice()) {
-    rc = 'block-dev;'
-  } else if (stats.isCharacterDevice()) {
-    rc = 'char-dev'
-  } else if (stats.isSymbolicLink()) {
-    rc = 'sym-link';
-  } else if (stats.isFIFO()) {
-    rc = 'fifo';
-  } else if (stats.isSocket()) {
-    rc = 'socket';
+    rc += 'file ';
   }
-  stats.file_type = rc;
+  if (stats.isDirectory()) {
+    rc += 'dir ';
+  }
+  if (stats.isBlockDevice()) {
+    rc += 'block-dev ';
+  }
+  if (stats.isCharacterDevice()) {
+    rc += 'char-dev ';
+  }
+  if (stats.isSymbolicLink()) {
+    rc += 'sym-link ';
+  }
+  if (stats.isFIFO()) {
+    rc += 'fifo ';
+  }
+  if (stats.isSocket()) {
+    rc += 'socket ';
+  }
+  stats.file_type = rc.trim();
   return rc;
 }
 
@@ -317,66 +328,19 @@ function count_files(map) {
   return rc;
 }
 
-function file_processing(storage) {
+function file_processing(storage_extended) {
 
-  let name = storage.name;
-  let file_count_to_do = storage.file_count_to_do;
-  let file_count_done = storage.file_count_done;
-  let set;
-
-  switch (storage.state) {
-    case STATE_DISCOVERING:
-      storage.file_count_done++;
-      if (storage.file_count_done % 10) {
-        return; //skip
-      }
-      set = storage.processing_discovery;
-      set.forEach((func, dummy, s) => {
-        //callback
-        process.nextTick(func,
-          storage.error, {
-            file_count_to_do,
-            file_count_done,
-            name
-          });
-      });
-      break;
-    case STATE_HASHING:
-      set = storage.processing_hmac_hashing
-      let files_being_processed = storage.files_being_processed;
-      set.forEach((func, dummy, s) => {
-        //callback
-        process.nextTick(() => {
-          func(storage.error, {
-            file_count_to_do,
-            file_count_done,
-            files_being_processed,
-            name,
-            file_name: storage.key
-          });
-          if (storage.end_of_file) {
-            files_being_processed.delete(storage.key);
-          }
-        });
-      });
-      break;
-    default:
-      return; //skip this
-  }
-}
-
-function is_file_processing_done(storage_extended) {
-
+  let name = storage_extended.name;
   let file_count_to_do = storage_extended.file_count_to_do;
   let file_count_done = storage_extended.file_count_done;
-  //
-  let set = null;
-  let name = storage_extended.name;
-  // call processing_xxx listeners one more time, then remove the listeners
+  let set;
+
   switch (storage_extended.state) {
     case STATE_DISCOVERING:
-      if (file_count_done != file_count_to_do) {
-        return false; //not done yet
+      //NOTE:: in this state, here storage_extended is not enriched and dus is the same as storage
+      storage_extended.file_count_done++;
+      if (storage_extended.file_count_done % 10) {
+        return; //skip
       }
       set = storage_extended.processing_discovery;
       set.forEach((func, dummy, s) => {
@@ -388,9 +352,58 @@ function is_file_processing_done(storage_extended) {
             name
           });
       });
+      break;
+    case STATE_HASHING:
+      //NOTE here storage_extended is exact as storage, not enriched
+      set = storage_extended.processing_hmac_hashing
+      let files_being_processed = storage_extended.files_being_processed;
+      set.forEach((func, dummy, s) => {
+        //callback
+        process.nextTick(() => {
+          func(storage_extended.error, {
+            file_count_to_do,
+            file_count_done,
+            files_being_processed,
+            name,
+            file_name: storage_extended.key
+          });
+          if (storage_extended.end_of_file) {
+            files_being_processed.delete(storage_extended.key);
+          }
+        });
+      });
+      break;
+    default:
+      return; //skip this
+  }
+}
+
+function is_file_processing_done(storage) {
+
+  let file_count_to_do = storage.file_count_to_do;
+  let file_count_done = storage.file_count_done;
+  //
+  let set = null;
+  let name = storage.name;
+  // call processing_xxx listeners one more time, then remove the listeners
+  switch (storage.state) {
+    case STATE_DISCOVERING:
+      if (file_count_done != file_count_to_do) {
+        return false; //not done yet
+      }
+      set = storage.processing_discovery;
+      set.forEach((func, dummy, s) => {
+        //callback
+        process.nextTick(func,
+          storage.error, {
+            file_count_to_do,
+            file_count_done,
+            name
+          });
+      });
       set.clear();
-      storage_extended.state = STATE_DISCOVERED;
-      set = storage_extended.done_discovered;
+      storage.state = STATE_DISCOVERED;
+      set = storage.done_discovered;
       set.forEach((func, dummy, s) => {
         process.nextTick(() => {
           func({
@@ -403,10 +416,11 @@ function is_file_processing_done(storage_extended) {
       set.clear();
       break;
     case STATE_HASHING:
-      set = storage_extended.processing_hmac_hashing;
+      //NOTE :storage_extended is not enriched here
+      set = storage.processing_hmac_hashing;
       set.clear();
       //
-      set = storage_extended.done_hmac;
+      set = storage.done_hmac;
       set.forEach((func, dummy, s) => {
         process.nextTick(() => {
           func({
@@ -417,9 +431,9 @@ function is_file_processing_done(storage_extended) {
         });
       });
       set.clear();
-      storage_extended.state = STATE_HASHED;
+      storage.state = STATE_HASHED;
       //NOTE: there is already a  [ storage.files_by_hmac ] MAP (build during the hashing)
-      storage_extended.files_by_key = flat_map_sort_on_key(storage_extended.dir_map);
+      storage.files_by_key = flat_map_sort_on_key(storage.dir_map);
     default:
       //skip this
   }
