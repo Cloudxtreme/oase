@@ -1,4 +1,4 @@
-'use strict';
+ittle 'use strict';
 
 /*
 
@@ -24,7 +24,7 @@
 
   data uplaod is
 
-  partial.length_file_name.file_name.uuid.[md5 has of all previous fields] (io.error -->mark storage as readonly)
+  partial.length_file_name.file_name.uuid.[md5 has of all previous fields] (io.error  -> storage is readonly)
   rename to "file_name-0n.ext" if it already existance (io.error--> mark storage as readonly)
   put the sha2 int the dictionary in memory
   mark the dictionary for flush (io.error -> mark storage as unusable and offline)
@@ -82,7 +82,6 @@ const READ_FILE_BUF_SIZE = 65336 * 4; //256k
 var global_storage = new Map();
 
 var SECRET = process.env.HMAC_SECRET || "purdy";
-
 var TRACE = process.env.TRACE_LEVEL;
 
 // test the hmac existance
@@ -118,11 +117,9 @@ function isFunction(p) {
   return (p instanceof Function);
 }
 
-
 function isString(s) {
   return (typeof s === "string");
 }
-
 
 function nano_time() {
   let hrt = process.hrtime();
@@ -266,6 +263,85 @@ function promise_wrap() {
 /* storage management */
 /* storage management */
 /* storage management */
+
+function pop_job_and_run(storage_name){
+   //TODO:here
+   /*
+   storage.job_queue = [{
+     func: discover_files
+   }, {
+     func: hash_files,
+     nr: 4
+   }];
+   */
+}
+
+
+/*
+NOTE: function is_resumable_io_err
+
+-->example
+{
+  [Error: ENOENT: no such file or directory, stat 'X:\\delsdfsdf.txt']
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'X:\\delsdfsdf.txt'
+}
+
+----
+EACCES          Permission denied (POSIX.1)
+EBADF           Bad file descriptor (POSIX.1)
+EBADFD          File descriptor in bad state
+EDQUOT          Disk quota exceeded (POSIX.1)
+EEXIST          File exists (POSIX.1)
+EFBIG           File too large (POSIX.1)
+EIO             Input/output error (POSIX.1)
+EISDIR          Is a directory (POSIX.1)
+EISNAM          Is a named type file
+ELOOP           Too many levels of symbolic links (POSIX.1)
+EMFILE          Too many open files (POSIX.1); commonly caused by
+                exceeding the RLIMIT_NOFILE resource limit described
+                in getrlimit(2)
+ENAMETOOLONG    Filename too long (POSIX.1)
+ENOENT          No such file or directory (POSIX.1)
+ENOSPC          No space left on device (POSIX.1)
+ENOTDIR         Not a directory (POSIX.1)
+EPERM           Operation not permitted (POSIX.1)
+EUSERS          Too many users
+*/
+
+function is_resumable_io_err(err) {
+  const resumable = ['EEXIST', 'ENOENT'];
+  if (in_arr(resumable, err.code)) {
+    return true;
+  }
+  return false;
+}
+
+
+function json_to_dir_map(json) {
+  if (!json) {
+    return null;
+  }
+  let current_map = new Map();
+  json.forEach((entry) => {
+    if (entry.full_path === ".") {
+      current_map.set(".", entry.stat);
+      continue;
+    }
+    if (/dir/.test(stat.file_type)) {
+      let child_map = json_to_dir_map(entry.children);
+      if (!child_map) {
+        continue;
+      }
+      current_map.set(entry.full_path, child_map);
+      continue;
+    }
+    current_map.set(entry.full_map, entry.stat);
+  });
+  return current_map;
+}
 
 function file_type(stats) {
 
@@ -642,6 +718,68 @@ function add_storage(options) {
     onDiscovering: discovering,
     onHashing: hashing
   };
+}
+
+function open_storage(storage_name) {
+  assert_defined_and_not_null(storage_name, "storage_name");
+  let storage = global_storage.get(storage_name);
+  //all ok for now
+  if (storage == null) {
+    return {
+      errno: -1,
+      err_descr: "storage [" + storage_name + "] doesnt exist"
+    };
+  }
+  //
+  if (!in_arr([
+      STATE_UNINITIALIZED,
+      STATE_UNUSABLE,
+      STATE_READ_ONLY
+    ], storage.state)) {
+    if (in_arr([
+        STATE_DISCOVERING,
+        STATE_DISCOVERED,
+        STATE_HASHING,
+        STATE_HASHED,
+        STATE_MERGING_DICTIONARY,
+        STATE_INITIALIZING
+      ], storage.state)) {
+      return {
+        errno: -2,
+        err_descr: "ERROR:storage [" + storage.name + "] is currently being activated: [" + storage.state + "]"
+      };
+    }
+
+    if (in_arr([STATE_MERGED_DICTIONARY], storage.state)) {
+      return {
+        errno: -2,
+        err_descr: "ERROR:storage [" + storage.name + "] is already open: [" + storage.state + "]"
+      };
+    }
+    throw new Error("ERROR:open_storage_unreachable, internal error, notify maintainer!");
+  }
+  //clear sailing
+  storage.state = STATE_INITIALIZING; //if the storage was previously open in STATE_READ_ONLY further connections are disallowed
+  //read config-dir
+  const confFile = path.join(storage.dictionary, "storage_${name}.json".replace("${name}", storage.name));
+  fs.readFile(confFile, "utf8", (err, data) => {
+    if (err) { // check if it is resumable error
+      if (is_resumable_io_err(err)) {
+        storage.dictionary_map = new Map();
+      } else {
+        storage.state = STATE_UNUSABLE;
+      }
+    } else {
+      storage.dictionary_map = json_to_dir_map(data);
+      storage.job_queue = [{
+        func: discover_files
+      }, {
+        func: hash_files,
+        nr: 4
+      }];
+      //TODO runqueue jobs
+    }
+  });
 }
 
 function discover_files(storage_name) {
