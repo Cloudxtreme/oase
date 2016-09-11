@@ -1,4 +1,4 @@
-ittle 'use strict';
+'use strict';
 
 /*
 
@@ -44,7 +44,7 @@ ittle 'use strict';
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-
+const chain_job = require('./scheduler.js');
 //constants
 
 const ERR_ARGUMENT_NOT_DEFINED = [1000, "Argument %s is not defined."];
@@ -166,29 +166,22 @@ function flat_map(map) {
         reduce(entry[1]);
         continue;
       }
+      if (entry[1].error) {
+        continue;
+      }
       rc.push(entry);
     }
   }
   reduce(map);
   //sort on keys
-  return rc.sort((a, b) => {
-    let k1 = a[0];
-    let k2 = b[0];
-    if (k1 < k2) {
-      return -1;
-    }
-    if (k1 > k2) {
-      return 1;
-    }
-    return 0;
-  });
   return rc;
 }
+
 
 function assert_function(func, name) {
   if (!(func instanceof Function)) {
     let e = ERR_NOT_A_FUNCTION.splice(0);
-    e[1].replace("%s", name);
+    e[1] = e[1].replace("%s", name || '');
     throw e;
   }
 }
@@ -206,7 +199,7 @@ function assert_string(str, name) {
   //console.log("str,name", str, name);
   if (typeof str != "string") {
     let e = ERR_NOT_A_STRING.splice(0);
-    e[1].replace("%s", name);
+    e[1] = e[1].replace("%s", name);
     throw e;
   }
 }
@@ -231,7 +224,7 @@ function assert_defined_and_not_null(arg, name) {
     e = ERR_ARGUMENT_IS_NULL.slice(0);
   }
   if (e) {
-    e.replace("%s", name);
+    e[1] = e[1].replace("%s", name);
     throw e;
   }
 }
@@ -264,16 +257,16 @@ function promise_wrap() {
 /* storage management */
 /* storage management */
 
-function pop_job_and_run(storage_name){
-   //TODO:here
-   /*
-   storage.job_queue = [{
-     func: discover_files
-   }, {
-     func: hash_files,
-     nr: 4
-   }];
-   */
+function pop_job_and_run(storage_name) {
+  //TODO:here
+  /*
+  storage.job_queue = [{
+    func: discover_files
+  }, {
+    func: hash_files,
+    nr: 4
+  }];
+  */
 }
 
 
@@ -312,7 +305,8 @@ EUSERS          Too many users
 */
 
 function is_resumable_io_err(err) {
-  const resumable = ['EEXIST', 'ENOENT'];
+  //File doest exist No such file or directory (POSIX.1)
+  const resumable = [ /*'EEXIST',*/ 'ENOENT'];
   if (in_arr(resumable, err.code)) {
     return true;
   }
@@ -320,23 +314,29 @@ function is_resumable_io_err(err) {
 }
 
 
-function json_to_dir_map(json) {
-  if (!json) {
+function json_to_dir_map(json_text) {
+  if (!json_text) {
+    return null;
+  }
+  let json;
+  try {
+    json = JSON.parse(json_text);
+  } catch (e) {
     return null;
   }
   let current_map = new Map();
   json.forEach((entry) => {
     if (entry.full_path === ".") {
       current_map.set(".", entry.stat);
-      continue;
+      return;
     }
     if (/dir/.test(stat.file_type)) {
       let child_map = json_to_dir_map(entry.children);
       if (!child_map) {
-        continue;
+        return;
       }
       current_map.set(entry.full_path, child_map);
-      continue;
+      return;
     }
     current_map.set(entry.full_map, entry.stat);
   });
@@ -390,6 +390,9 @@ function count_files(map) {
     }
     if (entry[0] === ".") {
       continue; //skip
+    }
+    if (entry[1].error) {
+      continue; //skip errors
     }
     if (typeof entry[0] == "string" && entry[1]) {
       rc[0]++;
@@ -449,7 +452,7 @@ function file_processing(storage_extended) {
   }
 }
 
-function is_file_processing_done(storage) {
+function is_file_processing_done(storage, chain_ctx) {
 
   let file_count_to_do = storage.file_count_to_do;
   let file_count_done = storage.file_count_done;
@@ -485,6 +488,8 @@ function is_file_processing_done(storage) {
         });
       });
       set.clear();
+      console.log("state-discovered, nextStep");
+      chain_ctx && chain_ctx.nextStep && chain_ctx.nextStep();
       break;
     case STATE_HASHING:
       //NOTE :storage_extended is not enriched here
@@ -505,6 +510,7 @@ function is_file_processing_done(storage) {
       storage.state = STATE_HASHED;
       //NOTE: there is already a  [ storage.files_by_hmac ] MAP (build during the hashing)
       storage.files_by_key = flat_map_sort_on_key(storage.dir_map);
+      chain_ctx && chain_ctx.nextStep && chain_ctx.nextStep();
     default:
       //skip this
   }
@@ -634,7 +640,7 @@ function add_storage(options) {
   }
   let name = options.name;
   if (!name) {
-    throw [-2, '[options] argument has no \"name\" property'];
+    throw [-2, '[options] argument has no \"name\" property!'];
   }
   name = name.toLowerCase();
   if (global_storage.has(name)) {
@@ -657,22 +663,24 @@ function add_storage(options) {
       },
     };
   }
+
   let base_dir = options.baseDir;
   assert_string(base_dir, "[baseDir option property]");
-  let dir_map = new Map([base_dir, null]);
+  let dir_map = new Map([
+    [base_dir, null]
+  ]);
 
   let dictionary = options.dictionaryDir;
   assert_string(dictionary, "[dictionaryDir option property]");
 
 
-
   let state = STATE_UNINITIALIZED;
-
   let storage = {
     name,
     dir_map,
     dictionary,
     state,
+    alerts: [],
     files_by_hmac: new Map(),
     /*
        paritioned in 4 groups, for faster operation
@@ -710,7 +718,7 @@ function add_storage(options) {
     return this;
   }
 
-  merge_with_dictionary(storage);
+  //TODO merge_with_dictionary(storage);
 
   return {
     onDiscovered: discovered,
@@ -720,178 +728,297 @@ function add_storage(options) {
   };
 }
 
-function open_storage(storage_name) {
-  assert_defined_and_not_null(storage_name, "storage_name");
-  let storage = global_storage.get(storage_name);
-  //all ok for now
-  if (storage == null) {
-    return {
-      errno: -1,
-      err_descr: "storage [" + storage_name + "] doesnt exist"
-    };
-  }
-  //
-  if (!in_arr([
-      STATE_UNINITIALIZED,
-      STATE_UNUSABLE,
-      STATE_READ_ONLY
-    ], storage.state)) {
-    if (in_arr([
-        STATE_DISCOVERING,
-        STATE_DISCOVERED,
-        STATE_HASHING,
-        STATE_HASHED,
-        STATE_MERGING_DICTIONARY,
-        STATE_INITIALIZING
-      ], storage.state)) {
+function is_storage_being_activated(state) {
+  return in_arr([
+    STATE_DISCOVERING,
+    STATE_DISCOVERED,
+    STATE_HASHING,
+    STATE_HASHED,
+    STATE_MERGING_DICTIONARY,
+    STATE_INITIALIZING
+  ], state);
+}
+
+
+function is_storage_openable(state) {
+  return in_arr([
+    STATE_UNINITIALIZED,
+    STATE_UNUSABLE /* yes here we can attempt a re-open */ ,
+    STATE_READ_ONLY /* yes here we can attempt a re-open */ ,
+  ], state);
+}
+
+function is_storage_discoverable(state) {
+  return STATE_INITIALIZING == state;
+}
+
+function is_storage_openable_ext(storage) {
+
+  if (!is_storage_openable(storage.state)) { //error not openable
+    //what kind of error, to return proper error message
+    if (is_storage_being_activated(storage.state)) {
       return {
         errno: -2,
         err_descr: "ERROR:storage [" + storage.name + "] is currently being activated: [" + storage.state + "]"
       };
     }
-
+    //already properly opened and merged
     if (in_arr([STATE_MERGED_DICTIONARY], storage.state)) {
       return {
         errno: -2,
         err_descr: "ERROR:storage [" + storage.name + "] is already open: [" + storage.state + "]"
       };
     }
-    throw new Error("ERROR:open_storage_unreachable, internal error, notify maintainer!");
+    //Not supposed to be here fall through
+    throw new Error("Internal Error, call Support at jkfbogers@gmail.com");
+  }
+  return {
+    errno: 0,
+    err_descr: "ok"
+  }; //all ok
+}
+
+function is_storage_discoverable(storage) {
+  return (storage.state == STATE_INITIALIZING);
+}
+
+function is_storage_discoverable_ext(storage) {
+  if (!is_storage_discoverable(storage)) {
+    //already properly opened and merged
+    if (in_arr([STATE_MERGED_DICTIONARY], storage.state)) {
+      return {
+        errno: -2,
+        err_descr: "ERROR:storage [" + storage.name + "] is already open: [" + storage.state + "]"
+      };
+    }
+    return {
+      errno: -3,
+      err_descr: "ERROR:storage [" + storage.name + "] is currently is not (re-)initialized  [" + storage.state + "]"
+    };
+  }
+  return {
+    errno: 0,
+    err_descr: "ok"
+  }; //all ok
+}
+
+
+
+function open_storage(storage_name) {
+  let chain = chain_job();
+  chain.add_step({
+    func: open_dictionary,
+    args: {
+      storage_name: storage_name
+    }
+  });
+  chain.add_step({
+    func: discover_files,
+    args: {
+      storage_name: storage_name
+    }
+  });
+  chain.add_step({
+    func: hash_files,
+    args: {
+      storage_name: storage_name,
+      count_concurrent: 4
+    }
+  });
+  chain.add_step({
+    func: () => {
+      console.log("CHAIN_DONE");
+    },
+  });
+  chain.run();
+  return chain;
+}
+
+function storage_doesnt_exist_err(chain_ctx) {
+  let rc = {
+    errno: -1,
+    err_descr: "storage [" + storage_name + "] doesnt exist"
+  };
+  //no choice, i have to place the error in the chain if there is no storage object
+  chain_ctx.slab && (
+    (chain_ctx.slab.errors = chain_ctx.slab.errors || []) &&
+    (chain_ctx.slab.errors.push(rc)));
+  chain_ctx.cancel && chain_ctx.cancel();
+  return rc;
+}
+
+
+function open_dictionary(chain_ctx) {
+
+  let storage_name = chain_ctx && chain_ctx.arguments && chain_ctx.arguments.storage_name;
+  console.log("open dictionary:", storage_name);
+  assert_defined_and_not_null(storage_name, "storage_name");
+  let storage = global_storage.get(storage_name);
+  //all ok for now
+  if (storage == null) {
+    console.log("storage isnt registered");
+    return storage_doesnt_exist_err(chain_ctx);
+  }
+  //
+  let rc = is_storage_openable_ext(storage);
+  //
+  if (rc.errno) {
+    console.log("storage is not openable");
+    storage.alerts.push(rc);
+    chain_ctx.cancel && chain_ctx.cancel();
+    return rc; //abort
   }
   //clear sailing
-  storage.state = STATE_INITIALIZING; //if the storage was previously open in STATE_READ_ONLY further connections are disallowed
-  //read config-dir
+  storage.state = STATE_INITIALIZING;
+  //
+  console.log("storage.state is now INITIALIZING");
   const confFile = path.join(storage.dictionary, "storage_${name}.json".replace("${name}", storage.name));
+  console.log("storage.state is now INITIALIZING,", confFile);
+  //
   fs.readFile(confFile, "utf8", (err, data) => {
-    if (err) { // check if it is resumable error
-      if (is_resumable_io_err(err)) {
-        storage.dictionary_map = new Map();
-      } else {
-        storage.state = STATE_UNUSABLE;
-      }
-    } else {
-      storage.dictionary_map = json_to_dir_map(data);
-      storage.job_queue = [{
-        func: discover_files
-      }, {
-        func: hash_files,
-        nr: 4
-      }];
-      //TODO runqueue jobs
+    if (!is_resumable_io_err(err)) {
+      storage.state = STATE_UNUSABLE;
+      storage.alerts.push(err);
+      console.log("dictionary un-usable.");
+      chain_ctx.cancel && chain_ctx.cancel();
+      return;
     }
+    storage.dictionary_map = json_to_dir_map(data) || new Map();
+    console.log("leaving open_dictionary -> nextStep");
+    chain_ctx.nextStep();
   });
 }
 
-function discover_files(storage_name) {
+function discover_files(chain_ctx) {
+  console.log('discover files');
+  let storage_name = chain_ctx && chain_ctx.arguments && chain_ctx.arguments.storage_name;
+  // in case chain_ctx is just a string
+  storage_name = storage_name || chain_ctx;
 
   assert_defined_and_not_null(storage_name, "storage_name");
   let storage = global_storage.get(storage_name);
   //all ok for now
   if (storage == null) {
-    return {
-      errno: -1,
-      err_descr: "storage [" + storage_name + "] doesnt exist"
-    };
+    console.log("no storage with than name found");
+    return storage_doesnt_exist_err(chain_ctx);
   }
   //
-  if (in_arr([STATE_DISCOVERING, STATE_HASHING], storage.state)) {
-    return {
-      errno: -2,
-      err_descr: "storage [" + storage.name + "] is already active: [" + storage.state + "]"
-    };
+  //this function isnt always called from open_storage function
+  //rediscovery can happen without re-reading the dictionary
+  let rc = is_storage_discoverable_ext(storage);
+  //
+  if (rc.errno) {
+    console.log("storage has wrong state", rc);
+    storage.alerts.push(rc);
+    chain_ctx.cancel && chain_ctx.cancel();
+    return rc; //abort
   }
   //all ok
   storage.state = STATE_DISCOVERING;
   //bootstrap base dirs to the count todo
+  console.log('state is now discovering');
   const dir_map = storage.dir_map;
   storage.file_count_to_do = storage.dir_map.size;
   storage.file_count_done = 0;
   dir_map.storage = storage;
   dir_map.forEach((val, key, m) => {
-    scan_dirs(m, key);
+    console.log("scan_dir:", key);
+    scan_dirs(m, key, chain_ctx); //pass on chain context
   });
   return true; //"kick off" was successfull
 }
 
-function scan_dirs(map, file_path) {
-  // console.log("map,path,flags,mode", map, file_path, flags, mode);
-  promise_wrap(fs.lstat, file_path).then(
-    (stat) => {
-      // TODO: when implementing shortname factory method, the call goes here.
-      //       call shortname function (..with process.nextTick()..) (lstat,file_path,map.storage.dir_map)
-      stat.full_path = file_path;
-      file_type(stat); //enrich stats with file_type
-      if (stat.isDirectory()) {
-        var map_children = new Map();
-        map.set(file_path, map_children);
-        map_children.set(".", stat);
-        map_children.parent = map;
-        map_children.storage = map.storage;
-        promise_wrap(fs.readdir, file_path).then(
-          (files) => {
-            map.storage.file_count_to_do += files.length;
-            file_processing(map.storage);
-            files.forEach((file, idx, arr) => {
+function scan_dirs(map, file_path, chain_ctx) {
 
-              process.nextTick(scan_dirs, map_children, path.join(file_path, file));
-            });
-            is_file_processing_done(map.storage);
-          }
-        ).catch((err) => { //error in fs?readdir
-          Object.assign(stat, {
-            error: err
-          });
+  promise_wrap(fs.lstat, file_path)
+    .then(
+      (stat) => {
+        // TODO: when implementing shortname factory method, the call goes here.
+        //       call shortname function (..with process.nextTick()..) (lstat,file_path,map.storage.dir_map)
+        stat.full_path = file_path;
+        file_type(stat); //enrich stats with file_type
+        if (!stat.isDirectory() && !(map.parent)) {
+          throw new Error("the storage entry-dir is not a directory");
+        }
+        if (stat.isDirectory()) {
+          var map_children = new Map();
+          map.set(file_path, map_children);
           map_children.set(".", stat);
+          map_children.parent = map;
+          map_children.storage = map.storage;
+          promise_wrap(fs.readdir, file_path).then(
+            (files) => {
+              //console.log("files discovered:", files.length);
+              map.storage.file_count_to_do += files.length;
+              file_processing(map.storage);
+              files.forEach((file, idx, arr) => {
+                process.nextTick(scan_dirs, map_children, path.join(file_path, file), chain_ctx);
+              });
+              is_file_processing_done(map.storage, chain_ctx);
+            }
+          ).catch((err) => { //error in fs?readdir
+            Object.assign(stat, {
+              error: err
+            });
+            //map_children.set(".", stat);
+            file_processing(map.storage);
+            is_file_processing_done(map.storage, chain_ctx);
+          });
+        } else {
+          //console.log(file_path);
+          map.set(file_path, stat);
           file_processing(map.storage);
-          is_file_processing_done(map.storage);
-        });
-      } else {
-        map.set(file_path, stat);
-        file_processing(map.storage);
-        is_file_processing_done(map.storage);
+          is_file_processing_done(map.storage, chain_ctx);
+        }
       }
-    }
-  ).catch((err) => {
-    map.set(file_path, {
-      error: err
+    ).catch((err) => {
+      console.log('error:', err);
+      map.set(file_path, {
+        error: err
+      });
+      file_processing(map.storage);
+      is_file_processing_done(map.storage, chain_ctx);
     });
-    file_processing(map.storage);
-    is_file_processing_done(map.storage);
-  });
 }
 
 /** hashing */
 /** hashing */
 /** hashing */
 
-function hash_files(storage_name, count_concurrent) {
+function hash_files(chain_ctx) {
 
-  if (count_concurrent == undefined) {
-    count_concurrent = 4;
-  }
+  console.log('hash files');
+  let storage_name = chain_ctx && chain_ctx.arguments && chain_ctx.arguments.storage_name;
+  storage_name = storage_name || chain_ctx;
+
+  let count_concurrent = chain_ctx && chain_ctx.arguments && chain_ctx.arguments.count_concurrent;
+  count_concurrent = count_concurrent || 4;
   //
   assert_defined_and_not_null(storage_name, "storage_name");
   let storage = global_storage.get(storage_name);
   //
   if (storage == null) {
-    return {
-      errno: -1,
-      err_descr: "storage [" + storage_name + "] doesnt exist"
-    };
+    return storage_doesnt_exist_err(chain_ctx);
   }
   //
   if (!in_arr([STATE_DISCOVERED, STATE_HASHED], storage.state)) {
-    return {
+    let rc = {
       errno: -2,
       err_descr: "storage [" + storage.name + "] is already active: [" + storage.state + "]"
     };
+    storage.alerts.push(rc);
+    chain_ctx.cancel && chain_ctx.cancel();
+    return rc;
   }
   //
   if (!g_hmac) {
-    return {
+    let rc = {
       errno: -3,
       err_descr: "no hash function (md5,sha256, md4) availible on system"
     };
+    storage.alerts.push(rc);
+    chain_ctx.cancel && chain_ctx.cancel();
+    return rc;
   }
   // -- all ok
   const dir_map = storage.dir_map;
@@ -911,8 +1038,8 @@ function hash_files(storage_name, count_concurrent) {
       console.log('this "thread" will stop...');
       //throw new Error("wtf?");
       if (files_being_processed.size == 0) {
-        console.log("FINISHED");
-        is_file_processing_done(storage);
+        console.log("HASING FINISHED");
+        is_file_processing_done(storage, chain_ctx);
       }
       return;
     }
@@ -1000,14 +1127,18 @@ function hash_files(storage_name, count_concurrent) {
         });
         console.log(("error:" + (++seq)), stat.bytes_processed, err);
       });
-  }
+  } //function process_file
+  //main part
   let i = 0;
+  if (all_files.length == 0){
+      chain_ctx.nextStep();
+      return;
+  }
   while (i < count_concurrent && all_files.length > 0) {
     process_file(all_files.pop()); //kick off
-    console.log(i);
     i++;
   }
-}
+} //function hash_files
 
 
 
@@ -1032,6 +1163,7 @@ function oase_expressjs(req, resp, next) {
     console.log("exit waypoint-1");
     return next(); //not a storage
   }
+
   //   the  format must be
   //   ..../storage_name/key/[physical full path]
   //    or
@@ -1241,33 +1373,6 @@ function send_file(stat, resp, func_update, func_complete, func_err) {
 }
 
 
-function configure_oase_expressjs(options) {
-  let context = {},
-    cpy = {};
-
-
-  if (!options) {
-    throw new TypeError("Specifiy [options] argument!");
-  }
-
-  Object.assign(cpy, options);
-  move_property(["func_complete", "func_err", "func_update"], context, cpy, isFunction);
-
-  try {
-    let testdir = fs.lstatSync(context.uploadDir);
-  } catch (e) {
-    //some error occurred so
-    console.error('Not a valid [uploadDir]:', e);
-    throw e;
-  }
-
-  if (Object.getOwnPropertyNames(options).length > 0) {
-    throw new TypeError("Argument [options] has unknown properties");
-  }
-
-  return oase_expressjs.bind(context);
-}
-
 module.exports = {
   states: {
     STATE_UNINITIALIZED,
@@ -1281,6 +1386,7 @@ module.exports = {
     LIST_FILTER_ALL,
     LIST_FILTER_SCAN_ERRORS_ONLY
   },
+  openStorage: open_storage,
   addStorage: add_storage,
   getStorage: get_storage,
   getStorageList: get_storage_list,
@@ -1289,5 +1395,5 @@ module.exports = {
   getFileList: get_file_list,
   getMultiples: get_multiples_by_hmac,
   getFilesByHmac: get_file_by_hmac,
-  confOaseExpressJS: configure_oase_expressjs
+  //confOaseExpressJS: configure_oase_expressjs //middleware
 }
