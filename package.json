@@ -1,6 +1,6 @@
 {
   "name": "oase",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "oase, distributed and clustered filesystem as a nodejs module ",
   "main": "index.js",
   "scripts": {
