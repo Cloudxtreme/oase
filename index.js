@@ -889,6 +889,30 @@ function open_dictionary(chain_ctx) {
   });
 }
 
+function paths_dictionary_minus_actual(actual_paths /*set*/ , dictionary_paths /*map*/ ) {
+
+  if (!dictionary_paths) {
+    return;
+  }
+  //make a copy coz we are going to remove from original
+  let dictionary_paths_arr = Array.from(dictionary_paths.keys());
+  dictionary_paths.delete(".");
+  dictionary_paths_arr.forEach((dict_path) => {
+    if (actual_paths.indexOf(dict_path) < 0) {
+      dictionary_paths.delete(dict_path);
+    }
+  });
+}
+
+function get_dictionary_value(map, key) {
+  let value = map && map.dictionary && map.dictionary.get(key);
+  return value;
+}
+
+function delete_dictionary_value(map, key) {
+  map && map.dictionary && map.dictionary.delete(key);
+}
+
 function discover_files(chain_ctx) {
   console.log('discover files');
   let storage_name = chain_ctx && chain_ctx.arguments && chain_ctx.arguments.storage_name;
@@ -940,8 +964,16 @@ function scan_dirs(map, file_path, chain_ctx) {
         if (!stat.isDirectory() && !(map.parent)) {
           throw new Error("the storage entry-dir is not a directory");
         }
+        let dictionary_obj = get_dictionary_value(map, file_path);
         if (stat.isDirectory()) {
+          if (!(dictionary_obj instanceof Map) || (dictionary_obj && dictionary_obj.error)) {
+            delete_dictionary_value(map, file_path);
+            dictionary_obj = null;
+          }
           var map_children = new Map();
+          if (dictionary_obj) {
+            map_children.dictionary = dictionary_obj;
+          }
           map.set(file_path, map_children);
           map_children.set(".", stat);
           map_children.parent = map;
@@ -949,6 +981,7 @@ function scan_dirs(map, file_path, chain_ctx) {
           promise_wrap(fs.readdir, file_path).then(
             (files) => {
               //console.log("files discovered:", files.length);
+              paths_dictionary_minus_actual(files, map.dictionary);
               map.storage.file_count_to_do += files.length;
               file_processing(map.storage);
               files.forEach((file, idx, arr) => {
@@ -960,18 +993,30 @@ function scan_dirs(map, file_path, chain_ctx) {
             Object.assign(stat, {
               error: err
             });
+            delete_dictionary_value(map, file_path);
             //map_children.set(".", stat);
             file_processing(map.storage);
             is_file_processing_done(map.storage, chain_ctx);
           });
         } else {
-          //console.log(file_path);
+          //normal file (not a directory)
           map.set(file_path, stat);
+          if (dictionary_obj instanceof Map || dictionary_obj.error ||
+            dictionary_obj.filetype != stat.file_type) {
+            delete_dictionary_value(map, file_path);
+            dictionary_obj = {};
+          } else {
+            if (dictionary_obj.mdate === stat.mdate.toJSON() &&
+              dictionary_obj.size === stat.size) {
+              stat.hmac = dictionary_obj.hmac;
+            }
+          }
           file_processing(map.storage);
           is_file_processing_done(map.storage, chain_ctx);
         }
       }
     ).catch((err) => {
+      delete_dictionary_value(map, file_path);
       console.log('error:', err);
       map.set(file_path, {
         error: err
@@ -1130,9 +1175,9 @@ function hash_files(chain_ctx) {
   } //function process_file
   //main part
   let i = 0;
-  if (all_files.length == 0){
-      chain_ctx.nextStep();
-      return;
+  if (all_files.length == 0) {
+    chain_ctx.nextStep();
+    return;
   }
   while (i < count_concurrent && all_files.length > 0) {
     process_file(all_files.pop()); //kick off
