@@ -883,11 +883,32 @@ function open_dictionary(chain_ctx) {
       chain_ctx.cancel && chain_ctx.cancel();
       return;
     }
-    storage.dictionary_map = json_to_dir_map(data) || new Map();
+    let dict = json_to_dir_map(data);
+    attonate_actual_dir_with_dictionary(storage.dir_map, dict);
     console.log("leaving open_dictionary -> nextStep");
     chain_ctx.nextStep();
   });
 }
+
+function attonate_actual_dir_with_dictionary(dir_map, dict) {
+
+  if (!dict || dict.size != 1) {
+    return;
+  }
+  let actual = Array.from(dir_map.keys());
+  if (actual.length != 1) {
+    throw new 'Error: actual directory to scan has more then one entry' + JSON.stringify(actual);
+  }
+  actual = actual[0];
+  let dict_entries = Array.from(dir_map.entries());
+  if (dict_entries[0] != actual) {
+    return null;
+  }
+  if (!(dict_entry[1] instanceof Map)) {
+    return null;
+  }
+  dir_map.dictionary = dict_entry[1];
+};
 
 function paths_dictionary_minus_actual(actual_paths /*set*/ , dictionary_paths /*map*/ ) {
 
@@ -910,7 +931,7 @@ function get_dictionary_value(map, key) {
 }
 
 function delete_dictionary_value(map, key) {
-  map && map.dictionary && map.dictionary.delete(key);
+  map && map.dictionary && (map.dictionary.delete instanceof Function) && map.dictionary.delete(key);
 }
 
 function discover_files(chain_ctx) {
@@ -1126,7 +1147,6 @@ function hash_files(chain_ctx) {
                   key
                 }, storage));
               }
-
               read_next_piece(position + bytes_read);
             });
           }
