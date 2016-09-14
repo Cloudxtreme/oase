@@ -802,8 +802,6 @@ function is_storage_discoverable_ext(storage) {
   }; //all ok
 }
 
-
-
 function open_storage(storage_name) {
   let chain = chain_job();
   chain.add_step({
@@ -884,7 +882,9 @@ function open_dictionary(chain_ctx) {
       return;
     }
     let dict = json_to_dir_map(data);
+    console.log("dict:", dict);
     attonate_actual_dir_with_dictionary(storage.dir_map, dict);
+    console.log("storage.dir_map:", storage.dir_map);
     console.log("leaving open_dictionary -> nextStep");
     chain_ctx.nextStep();
   });
@@ -900,7 +900,7 @@ function attonate_actual_dir_with_dictionary(dir_map, dict) {
     throw new 'Error: actual directory to scan has more then one entry' + JSON.stringify(actual);
   }
   actual = actual[0];
-  let dict_entries = Array.from(dir_map.entries());
+  let dict_entries = Array.hmacfrom(dir_map.entries());
   if (dict_entries[0] != actual) {
     return null;
   }
@@ -933,6 +933,31 @@ function get_dictionary_value(map, key) {
 function delete_dictionary_value(map, key) {
   map && map.dictionary && (map.dictionary.delete instanceof Function) && map.dictionary.delete(key);
 }
+
+function is_actual_equal_to_dictionary(actual, dict_entry) {
+  if (dict_entry instanceof Map) {
+    return false;
+  }
+  if (!dict_entry) {
+    return false;
+  }
+  if (dict_entry.error) {
+    return false;
+  }
+  if (dict_entry.file_type != actual.file_type) {
+    return false;
+  }
+  if (dict_entry.size != actual.size) {
+    return false;
+  }
+  if (dict_entry.mdate != actual.mdate.toJSON()) {
+    return false;
+  }
+  return true;
+}
+
+
+
 
 function discover_files(chain_ctx) {
   console.log('discover files');
@@ -987,10 +1012,12 @@ function scan_dirs(map, file_path, chain_ctx) {
         }
         let dictionary_obj = get_dictionary_value(map, file_path);
         if (stat.isDirectory()) {
+          console.log("we are scanning directory:", file_path);
           if (!(dictionary_obj instanceof Map) || (dictionary_obj && dictionary_obj.error)) {
             delete_dictionary_value(map, file_path);
             dictionary_obj = null;
           }
+          console.log("dictionary_object, map", dictionary_obj, map);
           var map_children = new Map();
           if (dictionary_obj) {
             map_children.dictionary = dictionary_obj;
@@ -1001,11 +1028,15 @@ function scan_dirs(map, file_path, chain_ctx) {
           map_children.storage = map.storage;
           promise_wrap(fs.readdir, file_path).then(
             (files) => {
-              //console.log("files discovered:", files.length);
+              console.log("files discovered:", files.length);
+
               paths_dictionary_minus_actual(files, map.dictionary);
+              //console.log("files,map:", files, new Map(map));
               map.storage.file_count_to_do += files.length;
               file_processing(map.storage);
-              files.forEach((file, idx, arr) => {
+              files.forEach((file) => {
+
+                console.log("nextTick:", file);
                 process.nextTick(scan_dirs, map_children, path.join(file_path, file), chain_ctx);
               });
               is_file_processing_done(map.storage, chain_ctx);
@@ -1021,16 +1052,12 @@ function scan_dirs(map, file_path, chain_ctx) {
           });
         } else {
           //normal file (not a directory)
+          //console.log('normal file processing:');
           map.set(file_path, stat);
-          if (dictionary_obj instanceof Map || dictionary_obj.error ||
-            dictionary_obj.filetype != stat.file_type) {
+          if (!is_actual_equal_to_dictionary(stat, dictionary_obj)) {
             delete_dictionary_value(map, file_path);
-            dictionary_obj = {};
           } else {
-            if (dictionary_obj.mdate === stat.mdate.toJSON() &&
-              dictionary_obj.size === stat.size) {
-              stat.hmac = dictionary_obj.hmac;
-            }
+            stat.hmac = dictionary_obj.hmac;
           }
           file_processing(map.storage);
           is_file_processing_done(map.storage, chain_ctx);
@@ -1056,7 +1083,7 @@ function hash_files(chain_ctx) {
   console.log('hash files');
   let storage_name = chain_ctx && chain_ctx.arguments && chain_ctx.arguments.storage_name;
   storage_name = storage_name || chain_ctx;
-
+  //
   let count_concurrent = chain_ctx && chain_ctx.arguments && chain_ctx.arguments.count_concurrent;
   count_concurrent = count_concurrent || 4;
   //
@@ -1090,21 +1117,19 @@ function hash_files(chain_ctx) {
   const dir_map = storage.dir_map;
   storage.file_count_to_do = count_files(dir_map);
   storage.state = STATE_HASHING;
-  //
   // -- bootstrap base dirs to the count todo
-  //
   storage.file_count_done = [0, 0];
   storage.files_being_processed = new Map();
-
+  //
   var all_files = flat_map(dir_map);
   let files_being_processed = storage.files_being_processed;
-
+  //
   function process_file(entry) {
     if (entry == undefined) {
       console.log('this "thread" will stop...');
       //throw new Error("wtf?");
       if (files_being_processed.size == 0) {
-        console.log("HASING FINISHED");
+        console.log("HASING FINISHED",dir_map);
         is_file_processing_done(storage, chain_ctx);
       }
       return;
@@ -1171,7 +1196,6 @@ function hash_files(chain_ctx) {
         }, storage));
         // console.log(("finish:" + (++seq)).green, key, stat.hmac, "<<");
         process.nextTick(process_file, all_files.pop());
-
       })
       .catch((error) => {
         stat.error = error;
@@ -1204,8 +1228,6 @@ function hash_files(chain_ctx) {
     i++;
   }
 } //function hash_files
-
-
 
 /** expressjs middleware */
 /** expressjs middleware */
@@ -1307,7 +1329,7 @@ function oase_expressjs(req, resp, next) {
     return;
   }
   //
-  // ok, se now we check for pattern /xxx/yyy
+  // ok, se now we check for pattern /xxx/yyy/
   //
   rc = /^\/(key|hmac)\/(.+)$/.exec(rest_path);
   if (!rc || !rc.length == 3) {
@@ -1337,7 +1359,8 @@ function oase_expressjs(req, resp, next) {
     return next(); //404 file not found in a valid storage
   }
   //send file to requester
-  //send_file(stat, resp, func_update, func_complete, func_err); // start sending
+  //send_file(stat, resp, func_update, func_complete, func_err);
+  // start sending
   send_file(stat, resp, this.func_update, this.func_complete, this.func_err);
   return;
 }
