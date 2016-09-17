@@ -45,6 +45,7 @@
  const path = require("path");
  const crypto = require("crypto");
  const chain_job = require('./scheduler.js');
+ const chk = require("./validator.js");
  //constants
 
  const ERR_ARGUMENT_NOT_DEFINED = [1000, "Argument %s is not defined."];
@@ -919,33 +920,23 @@
    if (actual.length != 1) {
      throw new 'Error: actual directory to scan has more then one entry' + JSON.stringify(actual);
    }
-   actual = actual[0];
-   let dict_entries = Array.from(dict.entries());
-   if (dict_entries[0][0] != actual) {
-     return null;
-   }
-   console.log(dict_entries[0][1]);
-   if (!(dict_entries[0][1] instanceof Map)) {
-     return null;
-   }
-   dir_map.dictionary = dict_entries[0][1];
-
+   dir_map.dictionary = dict;
  };
 
  function paths_dictionary_minus_actual(actual_paths /*set*/ , dictionary_paths /*map*/ ) {
+   if (!(dictionary_paths instanceof Map)) {
 
-   if (!dictionary_paths || !(dictionary_paths instanceof Map)) {
      return;
    }
    //make a copy coz we are going to remove from original
-   let dictionary_paths_arr = Array.from(dictionary_paths.keys());
-   dictionary_paths.delete(".");
+   let copyM = new Map(dictionary_paths);
+   copyM.delete(".");
+   let dictionary_paths_arr = Array.from(copyM.keys());
    dictionary_paths_arr.forEach((dict_path) => {
      if (actual_paths.indexOf(dict_path) < 0) {
        dictionary_paths.delete(dict_path);
      }
    });
-   console.log(Array.from(dictionary_paths.keys()));
 
  }
 
@@ -956,6 +947,9 @@
 
  function delete_dictionary_value(map, key) {
    map && map.dictionary && (map.dictionary.delete instanceof Function) && map.dictionary.delete(key);
+   if (map && map.dictionary && map.dictionary.size == 0) {
+     delete map.dictionary;
+   }
  }
 
  function is_actual_equal_to_dictionary(actual, dict_entry) {
@@ -1034,34 +1028,29 @@
          }
          let dictionary_obj = get_dictionary_value(map, file_path);
          if (stat.isDirectory()) {
-           dictionary_obj = map.dictionary || {};
-           //console.log("we are scanning directory:", dictionary_obj);
-           //process.exit();
-           if (!(dictionary_obj instanceof Map) || dictionary_obj.error) {
-             delete map.dictionary;
+           if (!(dictionary_obj instanceof Map)) {
+             delete_dictionary_value(map, file_path);
+             dictionary_obj = null;
            }
-           //console.log("we are scanning directory:", dictionary_obj);
-           //process.exit();
            var map_children = new Map();
            map.set(file_path, map_children);
            map_children.set(".", stat);
            map_children.parent = map;
            map_children.storage = map.storage;
+           if (dictionary_obj) {
+             map_children.dictionary = dictionary_obj;
+           }
            promise_wrap(fs.readdir, file_path).then(
              (files) => {
                files = files.map((file) => {
                  return path.join(file_path, file);
                });
                console.log("files discovered:", files.length);
-               //console.log("dict map1:", map.dictionary);
-               paths_dictionary_minus_actual(files, map.dictionary);
-               //console.log("dict map2:", map.dictionary);
+               paths_dictionary_minus_actual(files, dictionary_obj);
                map.storage.file_count_to_do += files.length;
                file_processing(map.storage);
                files.forEach((file) => {
-                 let subdict = get_dictionary_value(map.dictionary, file);
-
-                 process.nextTick(scan_dirs, map_children,  file, chain_ctx);
+                 process.nextTick(scan_dirs, map_children, file, chain_ctx);
                });
                is_file_processing_done(map.storage, chain_ctx);
              }
@@ -1069,7 +1058,7 @@
              Object.assign(stat, {
                error: err
              });
-             delete map.dictionary;
+             delete_dictionary_value(map, file_path);
              file_processing(map.storage);
              is_file_processing_done(map.storage, chain_ctx);
            });
@@ -1080,6 +1069,7 @@
            if (!is_actual_equal_to_dictionary(stat, dictionary_obj)) {
              delete_dictionary_value(map, file_path);
            } else {
+             console.log("copied hmac for ",file_path);
              stat.hmac = dictionary_obj.hmac;
            }
            file_processing(map.storage);
@@ -1153,7 +1143,7 @@
        console.log('this "thread" will stop...');
        //throw new Error("wtf?");
        if (files_being_processed.size == 0) {
-         console.log("HASING FINISHED", dir_map);
+         console.log("HASING FINISHED");
          is_file_processing_done(storage, chain_ctx);
        }
        return;
@@ -1244,7 +1234,6 @@
    //main part
    let i = 0;
    if (all_files.length == 0) {
-     cd
      chain_ctx.nextStep();
      return;
    }
@@ -1281,8 +1270,7 @@
      return rc;
    }
    let json_obj = dir_map_to_object_json(storage.dir_map);
-   //console.log(JSON.stringify(json_obj));
-
+   strip_dictionary_from_dir_map(storage.dir_map);
    const confFile = path.join(storage.dictionary, "storage_${name}.json".replace("${name}", storage.name));
    console.log("dictionary is being saved to:", confFile);
    //
@@ -1296,9 +1284,17 @@
      }
      chain_ctx.nextStep();
    });
-
  }
 
+
+ function strip_dictionary_from_dir_map(map) {
+   delete map.dictionary;
+   map.forEach((value) => {
+     if (value instanceof Map) {
+       strip_dictionary_from_dir_map(value);
+     }
+   });
+ }
 
 
  /** expressjs middleware */
